@@ -5,6 +5,7 @@ from scipy.ndimage import rotate
 from astropy import coordinates as coord
 from astropy.time import Time
 import astropy.units as u
+import astropy.constants as c
 from astropy.modeling import models, fitting
 from astropy.visualization import ZScaleInterval, SqrtStretch, ImageNormalize
 
@@ -135,7 +136,7 @@ def makeTrailHorizontal(imageArray, trailPoint1, trailPoint2, trailWidth):
     trailRotY : `int`
         y-coordinate of trailPoint1 in the rotated frame
     sliced : np.array
-        2D array, sized (trailLength x trailWidth), containing image data
+        2D array, sized (trailLength x 2*trailWidth), containing image data
         of a small region which includes the satellite trail
     """
     angle = np.arctan2(trailPoint2[1] - trailPoint1[1],
@@ -207,6 +208,39 @@ def plotSatelliteTrail(imageArray, trailPoint1, trailPoint2, trailWidth):
     plt.xlabel('Rotated X pixel position')
     plt.ylabel('Flux (nJy)')
     plt.title('Flux along the trail')
+
+
+def computeAngularSpeed(airmass, height=550*u.km):
+    """
+    Compute the angular speed of a satellite given its height (altitude) and
+    airmass (sec(z), where z is zenith angle).
+
+    Parameters
+    ----------
+        airmass : `float` (unitless)
+        height : `astropy.Quantity`, optional
+            Altitude or height of satellite above the surface of Earch (distance)
+            Default is 550 km
+
+    Returns
+    -------
+        speed : `astropy.Quantity`
+            Angular speed as seen from the surface of Earth (angle per time)
+    """
+    zangle = np.arccos(1./airmass) * u.rad
+    omega = np.sqrt(c.G * c.M_earth/(c.R_earth + height)**3)  # angular speed from center of earth
+    orbitSpeed = omega * (c.R_earth + height)
+    x = np.arcsin(c.R_earth * np.sin(zangle)/(c.R_earth + height))
+    # x is the angle between line of sight and (Radius of the Earth + height)
+    tanSpeed = orbitSpeed * np.cos(x)  # project orbitSpeed to perpendicular to line of sight
+    if np.isclose(x, 0):
+        d = height
+    else:
+        d = np.sin(zangle - x) * c.R_earth/np.sin(x)  # distance between satellite and observer on earth
+    angularSpeed = tanSpeed/d * u.rad  # angular speed from surface of Earth
+    # print(angularSpeed.to(u.deg / u.s))
+
+    return angularSpeed
 
 
 def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20):
@@ -285,13 +319,14 @@ def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20):
     # correction for exposure time
     corr = 2.5 * np.log10(visitInfo.getExposureTime())
     # distance traveled in sky by satellite in 1 second
-    dist_1_sec = 1800 * u.arcsec
+    airmass = visitInfo.getBoresightAirmass()
+    angularSpeed = computeAngularSpeed(airmass)
+    dist_1_sec = angularSpeed * 1.*u.s
     # correction for sky covered in 1 second
-    corr2 = 2.5 * np.log10(dist_1_sec.value * avg_fwhm * pixelScale.asArcseconds())
+    corr2 = 2.5 * np.log10(dist_1_sec.to(u.arcsec).value * avg_fwhm * pixelScale.asArcseconds())
     stationary_mag = mag_per_arcsec_squared - corr - corr2
 
     # Effective satellite size
-    airmass = visitInfo.getBoresightAirmass()
     size_eff = np.sqrt(avg_fwhm**2 - (psfRadius*2.355)**2) * pixelScale.asArcseconds() * airmass * u.arcsec
 
     # Save relevant information to results dict
@@ -315,6 +350,7 @@ def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20):
     results['Raw trail flux'] = flux_per_arcsec_squared * u.nJy * u.arcsec**(-2)
     results['Raw trail (mag)'] = mag_per_arcsec_squared * u.arcsec**(-2)
     results['Corrected trail (mag)'] = (mag_per_arcsec_squared - corr) * u.arcsec**(-2)
+    results['Angular speed'] = angularSpeed.to(u.deg / u.s)
     results['Stationary magnitude'] = stationary_mag
     results['Corrected stationary mag'] = (stationary_mag - 5*np.log10(airmass))
     results['Effective satellite size'] = size_eff
