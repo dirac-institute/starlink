@@ -10,6 +10,7 @@ from astropy.modeling import models, fitting
 from astropy.visualization import ZScaleInterval, SqrtStretch, ImageNormalize
 
 import lsst.daf.persistence as dafPersist
+import lsst.geom
 
 
 def loadData(repo, dataId):
@@ -25,8 +26,8 @@ def loadData(repo, dataId):
 
     Returns
     -------
-    njyImage : np.array
-        2D array of image data; pixel values are instantaneous flux in nJy.
+    njyImage : `lsst.afw.Image`
+        Image with pixel values of instrumental flux in nJy.
     photoCalib : `lsst.afw.image.PhotoCalib`
     psfRadius : `float`
         Size of PSF, conceptually equivalent to sigma if it were a Gaussian.
@@ -37,6 +38,8 @@ def loadData(repo, dataId):
         Dict-like metadata for the retrieved image.
     background : `lsst.afw.math.BackgroundList`
         Information about the image background.
+    wcs : `lsst.afw.geom.SkyWcs`
+        The WCS for the image.
     """
     butler = dafPersist.Butler(repo)
     calexp = butler.get('calexp', dataId=dataId)
@@ -50,7 +53,8 @@ def loadData(repo, dataId):
     pixelScale = calexp.getWcs().getPixelScale()
     visitInfo = calexp.getInfo().getVisitInfo()
     background = butler.get('calexpBackground', dataId=dataId)
-    return njyImage, photoCalib, psfRadius, pixelScale, visitInfo, background
+    wcs = calexp.getWcs()
+    return njyImage, photoCalib, psfRadius, pixelScale, visitInfo, background, wcs
 
 
 def fit_columns(sliced, center=20, doPlot=False):
@@ -210,37 +214,83 @@ def plotSatelliteTrail(imageArray, trailPoint1, trailPoint2, trailWidth):
     plt.title('Flux along the trail')
 
 
-def computeAngularSpeed(airmass, height=550*u.km):
+def computeAngularSpeed(visitInfo, wcs, trailPoint1, trailPoint2, height=550*u.km):
     """
-    Compute the angular speed of a satellite given its height (altitude) and
-    airmass (sec(z), where z is zenith angle).
+    Compute the angular speed of a satellite.
 
     Parameters
-    ----------
-        airmass : `float` (unitless)
-        height : `astropy.Quantity`, optional
-            Altitude or height of satellite above the surface of Earch (distance)
-            Default is 550 km
+    ------
+    visitInfo : `lsst.afw.image.VisitInfo`
+        Dict-like metadata for the image.
+    wcs : `lsst.afw.geom.SkyWcs`
+    The WCS for the image.
+    trailPoint1 : `list` with 2 values
+        [x1, y1] coordinates of first point on trail, in pixels
+    trailPoint2 : `list` with 2 values
+        [x2, y2] coordinates of second point on trail, in pixels
+    height : `astropy.Quantity`, optional
+        Altitude or height of satellite above the surface of Earch (distance)
+        Default is 550 km
 
     Returns
     -------
-        speed : `astropy.Quantity`
-            Angular speed as seen from the surface of Earth (angle per time)
+    speed : `astropy.Quantity`
+        Angular speed as seen from the surface of Earth (angle per time)
     """
+    airmass = visitInfo.getBoresightAirmass()
     zangle = np.arccos(1./airmass) * u.rad
     omega = np.sqrt(c.G * c.M_earth/(c.R_earth + height)**3)  # angular speed from center of earth
     orbitSpeed = omega * (c.R_earth + height)
     x = np.arcsin(c.R_earth * np.sin(zangle)/(c.R_earth + height))
     # x is the angle between line of sight and (Radius of the Earth + height)
-    tanSpeed = orbitSpeed * np.cos(x)  # project orbitSpeed to perpendicular to line of sight
     if np.isclose(x, 0):
         d = height
     else:
         d = np.sin(zangle - x) * c.R_earth/np.sin(x)  # distance between satellite and observer on earth
+
+    # Account for the fact that the satellite trail does not pass through zenith
+    az1, alt1 = trailPointToAzAlt(visitInfo, wcs, trailPoint1)
+    az2, alt2 = trailPointToAzAlt(visitInfo, wcs, trailPoint2)
+    if (alt1 == 0 and alt2 == 0 and az1 == 0 and az2 == 0):
+        tanSpeed = orbitSpeed * np.cos(x)  # project orbitSpeed to perpendicular to line of sight
+        # angleHorizon = 90
+    else:
+        tanTheta = (az2 - az1)/(alt2 - alt1)
+        xSquare = 1./(1 + np.tan(x)**2 + tanTheta**2)
+        zSquare = xSquare*np.tan(x)**2
+        tanSpeed = orbitSpeed * np.sqrt(1 - zSquare)
+        # angleHorizon = 90 - abs(np.degrees(np.arctan(tanTheta)))
     angularSpeed = tanSpeed/d * u.rad  # angular speed from surface of Earth
     # print(angularSpeed.to(u.deg / u.s))
 
     return angularSpeed
+
+
+def trailPointToAzAlt(visitInfo, wcs, trailPoint, loc="Cerro Tololo Interamerican Observatory"):
+    """Get the Azimuth and Altitude corresponding to an x, y image position.
+
+    Parameters
+    ----------
+    visitInfo : `lsst.afw.image.VisitInfo`
+        Dict-like metadata for the image.
+    wcs : `lsst.afw.geom.SkyWcs`
+        The WCS for the image.
+    trailPoint : `list` with 2 values
+            [x, y] coordinates of a point in image, in pixels
+    loc : `str`, optional
+        Default is "Cerro Tololo Interamerican Observatory"
+
+    """
+    dateObs = visitInfo.getDate().toPython()
+    dateObsAstropy = Time(dateObs)
+    sky_coord_afw = wcs.pixelToSky(lsst.geom.Point2D(trailPoint[0], trailPoint[1]))
+    sky_coord = coord.SkyCoord(sky_coord_afw.getRa().asDegrees()*u.deg,
+                               sky_coord_afw.getDec().asDegrees()*u.deg)
+    location = coord.EarthLocation.of_site(loc)
+    aa_frame = coord.AltAz(obstime=dateObsAstropy, location=location)
+    aa = sky_coord.transform_to(aa_frame)
+
+    return aa.az, aa.alt
 
 
 def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20):
@@ -276,7 +326,7 @@ def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20):
 
     """
     # Load data
-    njyImage, photoCalib, psfRadius, pixelScale, visitInfo, background = loadData(repo, dataId)
+    njyImage, photoCalib, psfRadius, pixelScale, visitInfo, background, wcs = loadData(repo, dataId)
 
     # Get sun location and phase angle
     boresight_raDec = visitInfo.getBoresightRaDec()
@@ -320,7 +370,7 @@ def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20):
     corr = 2.5 * np.log10(visitInfo.getExposureTime())
     # distance traveled in sky by satellite in 1 second
     airmass = visitInfo.getBoresightAirmass()
-    angularSpeed = computeAngularSpeed(airmass)
+    angularSpeed = computeAngularSpeed(visitInfo, wcs, trailPoint1, trailPoint2)
     dist_1_sec = angularSpeed * 1.*u.s
     # correction for sky covered in 1 second
     corr2 = 2.5 * np.log10(dist_1_sec.to(u.arcsec).value * avg_fwhm * pixelScale.asArcseconds())
