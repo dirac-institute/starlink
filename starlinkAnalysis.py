@@ -229,7 +229,7 @@ def computeAngularSpeed(visitInfo, wcs, trailPoint1, trailPoint2, height=550*u.k
     trailPoint2 : `list` with 2 values
         [x2, y2] coordinates of second point on trail, in pixels
     height : `astropy.Quantity`, optional
-        Altitude or height of satellite above the surface of Earch (distance)
+        Altitude or height of satellite above the surface of Earth
         Default is 550 km
 
     Returns
@@ -238,16 +238,11 @@ def computeAngularSpeed(visitInfo, wcs, trailPoint1, trailPoint2, height=550*u.k
         Angular speed as seen from the surface of Earth (angle per time)
     """
     airmass = visitInfo.getBoresightAirmass()
-    zangle = np.arccos(1./airmass) * u.rad
     omega = np.sqrt(c.G * c.M_earth/(c.R_earth + height)**3)  # angular speed from center of earth
     orbitSpeed = omega * (c.R_earth + height)
-    x = np.arcsin(c.R_earth * np.sin(zangle)/(c.R_earth + height))
+    x, d = computeDistanceToSatellite(airmass, height)
     # x is the angle between line of sight and (Radius of the Earth + height)
-    if np.isclose(x, 0):
-        d = height
-    else:
-        d = np.sin(zangle - x) * c.R_earth/np.sin(x)  # distance between satellite and observer on earth
-
+    # d is the distance between the satellite and an observer on earth
     # Account for the fact that the satellite trail does not pass through zenith
     az1, alt1 = trailPointToAzAlt(visitInfo, wcs, trailPoint1)
     az2, alt2 = trailPointToAzAlt(visitInfo, wcs, trailPoint2)
@@ -261,9 +256,70 @@ def computeAngularSpeed(visitInfo, wcs, trailPoint1, trailPoint2, height=550*u.k
         tanSpeed = orbitSpeed * np.sqrt(1 - zSquare)
         # angleHorizon = 90 - abs(np.degrees(np.arctan(tanTheta)))
     angularSpeed = tanSpeed/d * u.rad  # angular speed from surface of Earth
-    # print(angularSpeed.to(u.deg / u.s))
 
     return angularSpeed
+
+
+def computeDistanceToSatellite(airmass, height):
+    """Given airmass and range, compute how far away a satellite actually is.
+
+    Parameters
+    ----------
+    airmass : `float`
+        Airmass of the observation.
+    height : `astropy.Quantity`
+        Altitude or height of satellite above the surface of Earth
+
+    Returns
+    -------
+    x : `float`
+        The (small) angle between line of sight and (Radius of the Earth + height)
+    d: `astropy.Quantity`
+        The distance between the satellite and an observer on earth
+    """
+    zangle = np.arccos(1./airmass) * u.rad
+    x = np.arcsin(c.R_earth * np.sin(zangle)/(c.R_earth + height))
+    if np.isclose(x, 0):
+        d = height
+    else:
+        d = np.sin(zangle - x) * c.R_earth/np.sin(x)
+    return x, d
+
+
+def computeSatelliteSize(avg_fwhm, psfRadius, airmass, pixelScale,
+                         D_mirror=4*u.m, height=550*u.km):
+    """Compute the physical size of a satellite at zenith.
+
+    Parameters
+    ----------
+    avg_fwhm : `float`
+        Average FWHM of satellite trail width on an image, in pixels.
+    psfRadius : `float`
+        Size of PSF, conceptually equivalent to sigma if it were a Gaussian.
+        Multiply by 2.355 to get the PSF size as a FWHM instead.
+    airmass : `float`
+        Airmass of the observation.
+    pixelScale : `lsst.geom.Angle`
+        Size of a pixel on the sky, by default in radians.
+    D_mirror
+    height : `astropy.Quantity`, optional
+        Altitude or height of satellite above the surface of Earth
+        Default is 550 km
+
+    Returns
+    -------
+    sat_size : `astropy.Quantity`
+        The derived physical size of the satellite at zenith.
+    """
+    avg_fwhm = avg_fwhm * pixelScale.asRadians() * u.rad
+    psfRadius = psfRadius * pixelScale.asRadians() * u.rad
+    x, d = computeDistanceToSatellite(airmass, height)
+    angular_size_squared = avg_fwhm**2 - (psfRadius*2.355)**2  # in square radians
+    # note that angular_size^2 = (D_sat^2 + D_mirror^2) / d^2
+    sat_size_squared = (angular_size_squared.value * d**2) - D_mirror**2
+    sat_size = np.sqrt(sat_size_squared)
+    # note we assume tan(angular_size) ~ angular_size as D << d
+    return d, sat_size
 
 
 def trailPointToAzAlt(visitInfo, wcs, trailPoint, loc="Cerro Tololo Interamerican Observatory"):
@@ -377,7 +433,7 @@ def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20):
     stationary_mag = mag_per_arcsec_squared - corr - corr2
 
     # Effective satellite size
-    size_eff = np.sqrt(avg_fwhm**2 - (psfRadius*2.355)**2) * pixelScale.asArcseconds() * airmass * u.arcsec
+    dist_to_sat, sat_size = computeSatelliteSize(avg_fwhm, psfRadius, airmass, pixelScale)
 
     # Save relevant information to results dict
     results = dict()
@@ -403,7 +459,8 @@ def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20):
     results['Angular speed'] = angularSpeed.to(u.deg / u.s)
     results['Stationary magnitude'] = stationary_mag
     results['Corrected stationary mag'] = (stationary_mag - 5*np.log10(airmass))
-    results['Effective satellite size'] = size_eff
+    results['Derived satellite size'] = sat_size.to(u.m)
+    results['Distance to satellite'] = dist_to_sat.to(u.km)
 
     # Round overly precise values
     for key, value in results.items():
