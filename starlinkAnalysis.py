@@ -150,12 +150,16 @@ def makeTrailHorizontal(imageArray, trailPoint1, trailPoint2, trailWidth):
     xmax = len(imageArray[0])
     ymax = len(imageArray)
     rotatedArray = rotate(imageArray, angle)
-    trailRotYPart1 = np.abs(xmax * np.sin(angle))
+    trailRotXPart2 = trailPoint1[0]/np.cos(angle)
     trailRotYPart2 = (xmax*slope + yint) * np.cos(angle)
+    if yint > 0:
+        trailRotYPart1 = np.abs(xmax * np.sin(angle))
+        trailRotXPart1 = np.abs((ymax - yint) * np.sin(angle))
+        trailRotX = int(trailRotXPart1 + trailRotXPart2)
+    else:
+        trailRotYPart1 = 0
+        trailRotX = int(ymax - trailRotXPart2)
     trailRotY = int(trailRotYPart1 + trailRotYPart2)
-    trailRotXPart1 = np.abs((ymax - yint) * np.sin(angle))
-    trailRotXPart2 = np.abs(trailPoint1[0]/np.cos(angle))
-    trailRotX = int(trailRotXPart1 + trailRotXPart2)
     trailLength = getTrailLength(trailPoint1, trailPoint2)
     sliced = rotatedArray[trailRotY - trailWidth:trailRotY + trailWidth,
                           trailRotX:trailRotX + trailLength]
