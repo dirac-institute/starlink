@@ -57,6 +57,34 @@ def loadData(repo, dataId):
     return njyImage, photoCalib, psfRadius, pixelScale, visitInfo, background, wcs
 
 
+def getDateObsAstropy(visitInfo, dateOverride):
+    """Return an exposure's date and time in astropy format.
+
+    Parameters
+    ----------
+    visitInfo : `lsst.afw.image.VisitInfo`
+        Dict-like metadata for an exposure.
+    dateOverride : `str` or `None`
+        If the visitInfo date is wrong, this permits a user to pass along
+        the correct date to use. Must be e.g. '2020-01-01' format.
+
+    Returns
+    -------
+    dateObsAstropy : `astropy.time.Time`
+    """
+    if dateOverride is not None:
+        dateObs = dateOverride
+        dateObs = Time(dateOverride + 'T'
+                       + str(visitInfo.getDate().toPython().time().hour) + ':'
+                       + str(visitInfo.getDate().toPython().time().minute) + ':'
+                       + str(visitInfo.getDate().toPython().time().second) + '.'
+                       + str(visitInfo.getDate().toPython().time().microsecond))
+    else:
+        dateObs = visitInfo.getDate().toPython()
+    dateObsAstropy = Time(dateObs)
+    return dateObsAstropy
+
+
 def fit_columns(sliced, center=20, doPlot=False):
     """Return the fitted gaussian widths (stddevs)
     of all columns in a numpy array.
@@ -218,7 +246,8 @@ def plotSatelliteTrail(imageArray, trailPoint1, trailPoint2, trailWidth):
     plt.title('Flux along the trail')
 
 
-def computeAngularSpeed(visitInfo, wcs, trailPoint1, trailPoint2, height=550*u.km):
+def computeAngularSpeed(visitInfo, wcs, trailPoint1, trailPoint2, dateOverride,
+                        height=550*u.km):
     """
     Compute the angular speed of a satellite.
 
@@ -232,6 +261,9 @@ def computeAngularSpeed(visitInfo, wcs, trailPoint1, trailPoint2, height=550*u.k
         [x1, y1] coordinates of first point on trail, in pixels
     trailPoint2 : `list` with 2 values
         [x2, y2] coordinates of second point on trail, in pixels
+    dateOverride : `str` or `None`
+        If the visitInfo date is wrong, this permits a user to pass along
+        the correct date to use. Must be e.g. '2020-01-01' format.
     height : `astropy.Quantity`, optional
         Altitude or height of satellite above the surface of Earth
         Default is 550 km
@@ -248,8 +280,8 @@ def computeAngularSpeed(visitInfo, wcs, trailPoint1, trailPoint2, height=550*u.k
     # x is the angle between line of sight and (Radius of the Earth + height)
     # d is the distance between the satellite and an observer on earth
     # Account for the fact that the satellite trail does not pass through zenith
-    az1, alt1 = trailPointToAzAlt(visitInfo, wcs, trailPoint1)
-    az2, alt2 = trailPointToAzAlt(visitInfo, wcs, trailPoint2)
+    az1, alt1 = trailPointToAzAlt(visitInfo, wcs, trailPoint1, dateOverride)
+    az2, alt2 = trailPointToAzAlt(visitInfo, wcs, trailPoint2, dateOverride)
     if (alt1 == 0 and alt2 == 0 and az1 == 0 and az2 == 0):
         tanSpeed = orbitSpeed * np.cos(x)  # project orbitSpeed to perpendicular to line of sight
         # angleHorizon = 90
@@ -326,7 +358,8 @@ def computeSatelliteSize(avg_fwhm, psfRadius, airmass, pixelScale,
     return d, sat_size
 
 
-def trailPointToAzAlt(visitInfo, wcs, trailPoint, loc="Cerro Tololo Interamerican Observatory"):
+def trailPointToAzAlt(visitInfo, wcs, trailPoint, dateOverride,
+                      loc="Cerro Tololo Interamerican Observatory"):
     """Get the Azimuth and Altitude corresponding to an x, y image position.
 
     Parameters
@@ -337,12 +370,20 @@ def trailPointToAzAlt(visitInfo, wcs, trailPoint, loc="Cerro Tololo Interamerica
         The WCS for the image.
     trailPoint : `list` with 2 values
             [x, y] coordinates of a point in image, in pixels
+    dateOverride : `str` or `None`
+        If the visitInfo date is wrong, this permits a user to pass along
+        the correct date to use. Must be e.g. '2020-01-01' format.
     loc : `str`, optional
         Default is "Cerro Tololo Interamerican Observatory"
 
+    Returns
+    -------
+    aa.az : `astropy.Quantity`
+        Azimuth angle
+    aa.alt : `astropy.Quantity`
+        Altitude angle
     """
-    dateObs = visitInfo.getDate().toPython()
-    dateObsAstropy = Time(dateObs)
+    dateObsAstropy = getDateObsAstropy(visitInfo, dateOverride)
     sky_coord_afw = wcs.pixelToSky(lsst.geom.Point2D(trailPoint[0], trailPoint[1]))
     sky_coord = coord.SkyCoord(sky_coord_afw.getRa().asDegrees()*u.deg,
                                sky_coord_afw.getDec().asDegrees()*u.deg)
@@ -353,7 +394,7 @@ def trailPointToAzAlt(visitInfo, wcs, trailPoint, loc="Cerro Tololo Interamerica
     return aa.az, aa.alt
 
 
-def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20):
+def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20, dateOverride=None):
     """Analyze an image processed with the LSST Science Pipelines
     containing a satellite trail.
 
@@ -371,6 +412,9 @@ def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20):
     trailWidth : `int`
         Approximate half-width of satellite trail, in pixels, optional
         Default is 20
+    dateOverride : `str` or `None`, optional
+        If the visitInfo date is wrong, this permits a user to pass along
+        the correct date to use. Must be e.g. '2020-01-01' format.
 
     Returns
     -------
@@ -390,8 +434,7 @@ def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20):
 
     # Get sun location and phase angle
     boresight_raDec = visitInfo.getBoresightRaDec()
-    dateObs = visitInfo.getDate().toPython()
-    dateObsAstropy = Time(dateObs)
+    dateObsAstropy = getDateObsAstropy(visitInfo, dateOverride)
     sky_coord = coord.SkyCoord(boresight_raDec.getRa().asDegrees()*u.deg,
                                boresight_raDec.getDec().asDegrees()*u.deg)
     location = coord.EarthLocation.of_site('Cerro Tololo Interamerican Observatory')
@@ -430,7 +473,7 @@ def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20):
     corr = 2.5 * np.log10(visitInfo.getExposureTime())
     # distance traveled in sky by satellite in 1 second
     airmass = visitInfo.getBoresightAirmass()
-    angularSpeed = computeAngularSpeed(visitInfo, wcs, trailPoint1, trailPoint2)
+    angularSpeed = computeAngularSpeed(visitInfo, wcs, trailPoint1, trailPoint2, dateOverride)
     dist_1_sec = angularSpeed * 1.*u.s
     # correction for sky covered in 1 second
     corr2 = 2.5 * np.log10(dist_1_sec.to(u.arcsec).value * avg_fwhm * pixelScale.asArcseconds())
@@ -441,8 +484,8 @@ def starlinkAnalyze(repo, dataId, trailPoint1, trailPoint2, trailWidth=20):
 
     # Save relevant information to results dict
     results = dict()
-    results['Visit'] = dataId['visit']
-    results['CCD'] = dataId['ccd']
+    # results['Visit'] = dataId['visit']
+    # results['CCD'] = dataId['ccd']
     results['Date and time (UTC)'] = dateObsAstropy
     results['Exposure time'] = visitInfo.getExposureTime() * u.s
     results['Boresight Az'] = visitInfo.getBoresightAzAlt()[0].asDegrees() * u.deg
